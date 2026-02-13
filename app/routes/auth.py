@@ -7,13 +7,11 @@ from urllib.parse import urlencode
 from fastapi.responses import RedirectResponse
 
 from app.core.database import get_db
-from app.core.settings import get_settings
+from app.core.settings import settings
 from app.core.security import create_access_token
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
-
-settings = get_settings()
 
 import httpx
 from datetime import datetime, timedelta

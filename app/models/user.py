@@ -1,5 +1,6 @@
+# app/models/user.py (UPDATED - with indexes)
 import uuid
-from sqlalchemy import Column, String, DateTime, Text
+from sqlalchemy import Column, String, DateTime, Text, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -19,6 +20,7 @@ class User(Base):
     picture = Column(String, nullable=True)
 
     # 🔐 OAuth Tokens (Required for Google Forms API access)
+    # ⚠️ IMPORTANT: These should be encrypted at rest in production
     google_access_token = Column(Text, nullable=True)
     google_refresh_token = Column(Text, nullable=True)
     token_expiry = Column(DateTime(timezone=True), nullable=True)
@@ -42,4 +44,10 @@ class User(Base):
         "Form",
         back_populates="user",
         cascade="all, delete-orphan"
+    )
+
+    # Indexes
+    __table_args__ = (
+        Index('idx_user_google_id', 'google_id'),
+        Index('idx_user_email', 'email'),
     )

@@ -6,11 +6,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from app.core.settings import get_settings
+from app.core.settings import settings
 from app.core.database import get_db
 from app.models.user import User
 
-settings = get_settings()
 security = HTTPBearer()
 
 
