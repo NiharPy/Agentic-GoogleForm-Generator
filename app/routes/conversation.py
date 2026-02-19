@@ -174,18 +174,17 @@ async def continue_conversation(
     current_user=Depends(get_current_user)
 ):
     """
-    Continue an existing conversation with a new message
-    
+    Continue an existing conversation and update form schema.
+
     Flow:
-    1. Fetch existing conversation
-    2. Get current form_snapshot from Qdrant
-    3. Invoke planner with existing snapshot
-    4. Planner modifies form_snapshot
-    5. Planner creates new AgentTask for executor
-    6. Executor updates Google Form via MCP
+    1. Validate conversation
+    2. Invoke planner with existing form_snapshot
+    3. Planner updates form_snapshot
+    4. Planner creates AgentTask
+    5. Background: Executor worker processes task
     """
-    
-    # 1️⃣ Validate conversation exists and belongs to user
+
+    # 1️⃣ Validate conversation
     result = await db.execute(
         select(Conversation).where(
             Conversation.id == conversation_id,
@@ -193,115 +192,100 @@ async def continue_conversation(
         )
     )
     conversation = result.scalar_one_or_none()
-    
+
     if not conversation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conversation not found"
         )
-    
-    # 2️⃣ Check if conversation is still active
+
     if conversation.status != "active":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot continue conversation with status: {conversation.status}"
         )
-    
-    # 3️⃣ Retrieve current form snapshot
-    # Try Qdrant first, fall back to DB
-    qdrant_client = QdrantClient()
-    
-    try:
-        form_data = await qdrant_client.get_by_conversation(conversation_id)
-        form_snapshot = form_data.get("form_snapshot") if form_data else None
-    except Exception as e:
-        logger.warning(f"Failed to get from Qdrant: {e}, using DB")
-        form_snapshot = None
-    
-    # Fall back to DB snapshot
-    if not form_snapshot:
-        form_snapshot = conversation.form_snapshot
-    
-    current_field_count = len(form_snapshot.get('fields', [])) if form_snapshot else 0
-    logger.info(f"📋 Current form has {current_field_count} fields")
-    
-    # 4️⃣ Invoke Planner Agent with existing snapshot
-    logger.info(f"🤖 Invoking planner with continuation: '{body.message}'")
-    
+
+    logger.info(f"✏️ Continuing conversation {conversation_id}")
+
+    current_field_count = (
+        len(conversation.form_snapshot.get("fields", []))
+        if conversation.form_snapshot
+        else 0
+    )
+
+    # 2️⃣ Invoke Planner
     start_time = time.time()
-    
+
     try:
         result = await planner_graph.ainvoke({
             "user_prompt": body.message,
             "documents": body.documents,
-            "form_snapshot": form_snapshot,  # Pass existing snapshot
+            "form_snapshot": conversation.form_snapshot,
             "conversation_id": conversation_id,
             "is_continuation": True
         })
-        
+
         elapsed = time.time() - start_time
         logger.info(f"✅ Planner completed in {elapsed:.2f}s")
-        
-        # 5️⃣ Check if planner succeeded
+
+        # Handle planner error
         if result.get("error"):
-            logger.error(f"Planner error: {result['error']}")
+            conversation.status = "failed"
+            await db.commit()
+
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Form update failed: {result.get('error')}"
             )
-        
-        # 6️⃣ Refresh conversation from DB to get updated snapshot
+
+        # 3️⃣ Refresh updated snapshot
         await db.refresh(conversation)
-        
-        # 7️⃣ Get updated snapshot
-        try:
-            updated_form_data = await qdrant_client.get_by_conversation(conversation_id)
-            updated_snapshot = updated_form_data.get("form_snapshot") if updated_form_data else None
-        except Exception as e:
-            logger.warning(f"Failed to get updated from Qdrant: {e}")
-            updated_snapshot = None
-        
-        # Use DB snapshot as primary source
-        final_snapshot = conversation.form_snapshot or updated_snapshot
-        
-        new_field_count = len(final_snapshot.get('fields', [])) if final_snapshot else 0
-        logger.info(f"📋 Updated form has {new_field_count} fields")
-        
-        # 8️⃣ Update conversation metadata
+
+        new_field_count = (
+            len(conversation.form_snapshot.get("fields", []))
+            if conversation.form_snapshot
+            else 0
+        )
+
+        # 4️⃣ Update metadata
         conversation.current_version += 1
         conversation.updated_at = datetime.utcnow()
         await db.commit()
-        
-        # 9️⃣ Trigger executor to update Google Form
-        background_tasks.add_task(trigger_executor_for_conversation, conversation_id)
-        
-        logger.info(
-            f"✅ Conversation updated. "
-            f"Fields: {current_field_count} → {new_field_count}. "
-            f"Executor updating Google Form in background."
+
+        logger.info(f"📋 Fields updated: {current_field_count} → {new_field_count}")
+
+        # 5️⃣ Trigger executor (same pattern as /start)
+        background_tasks.add_task(
+            trigger_executor_for_conversation,
+            conversation_id
         )
-        
+
+        logger.info("🚀 Executor running in background")
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to continue conversation: {e}", exc_info=True)
+        conversation.status = "failed"
+        await db.commit()
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update form: {str(e)}"
         )
-    
-    # 🔟 Return updated conversation
+
+    # 6️⃣ Return immediately
     return {
-        "conversation_id": conversation_id,
+        "id": conversation_id,
         "status": conversation.status,
         "version": conversation.current_version,
-        "message": "Form updated successfully. Google Form update in progress.",
-        "form_snapshot": final_snapshot,
+        "form_snapshot": conversation.form_snapshot,
         "field_count": new_field_count,
         "field_change": f"{current_field_count} → {new_field_count}",
-        "processing_time": f"{elapsed:.2f}s",
         "executor_status": "processing",
-        "timestamp": conversation.updated_at
+        "message": "Form schema updated. Google Form update in progress.",
+        "processing_time": f"{elapsed:.2f}s",
+        "updated_at": conversation.updated_at
     }
 
 

@@ -294,3 +294,155 @@ async def create_google_form(user, form_snapshot, db):
     logger.info(f"✅ Form created successfully: {form_url}")
 
     return form_id, form_url
+
+
+# Add this to app/core/google_forms.py
+
+async def update_google_form(user, form_id: str, form_snapshot: dict, db):
+    """
+    Update an existing Google Form
+    
+    Strategy:
+    1. Refresh token if needed
+    2. Get current form
+    3. Delete all existing questions
+    4. Add new questions from updated form_snapshot
+    5. Update form title/description if changed
+    
+    Args:
+        user: User object with Google credentials
+        form_id: Existing Google Form ID
+        form_snapshot: Updated form schema
+        db: Database session
+        
+    Returns:
+        tuple: (form_id, form_url)
+    """
+    
+    access_token = await refresh_if_expired(user, db)
+
+    # Get credentials from environment
+    client_id = settings.GOOGLE_CLIENT_ID
+    client_secret = settings.GOOGLE_CLIENT_SECRET
+    
+    if not client_id or not client_secret:
+        raise ValueError(
+            "Missing Google OAuth credentials. "
+            "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables."
+        )
+
+    creds = Credentials(
+        token=access_token,
+        refresh_token=user.google_refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=SCOPES,
+    )
+
+    service = build("forms", "v1", credentials=creds)
+
+    logger.info(f"🔄 Updating form {form_id}")
+
+    # 1️⃣ Get current form to find existing items
+    try:
+        current_form = service.forms().get(formId=form_id).execute()
+    except Exception as e:
+        logger.error(f"Failed to get form {form_id}: {e}")
+        raise
+
+    # 2️⃣ Delete all existing questions
+    existing_items = current_form.get("items", [])
+    
+    if existing_items:
+        delete_requests = []
+        for item in existing_items:
+            # Delete from position 0 repeatedly (as items shift down)
+            delete_requests.append({
+                "deleteItem": {
+                    "location": {
+                        "index": 0
+                    }
+                }
+            })
+        
+        logger.info(f"🗑️  Deleting {len(delete_requests)} existing questions")
+        
+        try:
+            service.forms().batchUpdate(
+                formId=form_id,
+                body={"requests": delete_requests}
+            ).execute()
+        except Exception as e:
+            logger.error(f"Failed to delete existing questions: {e}")
+            # Continue anyway - we'll add new questions
+
+    # 3️⃣ Update form info (title and description) if changed
+    title = form_snapshot.get("title", "Untitled Form")
+    description = form_snapshot.get("description", "")
+    
+    info_requests = []
+    
+    if title != current_form.get("info", {}).get("title"):
+        info_requests.append({
+            "updateFormInfo": {
+                "info": {
+                    "title": title,
+                    "documentTitle": title
+                },
+                "updateMask": "title,documentTitle"
+            }
+        })
+    
+    if description and description != current_form.get("info", {}).get("description"):
+        info_requests.append({
+            "updateFormInfo": {
+                "info": {
+                    "description": description
+                },
+                "updateMask": "description"
+            }
+        })
+    
+    if info_requests:
+        logger.info("📝 Updating form title/description")
+        service.forms().batchUpdate(
+            formId=form_id,
+            body={"requests": info_requests}
+        ).execute()
+
+    # 4️⃣ Add new questions (skip unsupported ones like file upload)
+    requests = []
+    skipped_fields = []
+    
+    for index, field in enumerate(form_snapshot.get("fields", [])):
+        question = convert_field_to_question(field, index - len(skipped_fields))
+        
+        if question is None:
+            # Field was skipped (e.g., file upload)
+            skipped_fields.append(field.get("label"))
+            continue
+            
+        requests.append(question)
+
+    if requests:
+        logger.info(f"📤 Adding {len(requests)} new questions")
+        
+        service.forms().batchUpdate(
+            formId=form_id,
+            body={"requests": requests}
+        ).execute()
+        
+        logger.info("✅ Questions added successfully")
+    
+    # Log skipped fields
+    if skipped_fields:
+        logger.warning(f"⚠️ Skipped {len(skipped_fields)} unsupported fields: {', '.join(skipped_fields)}")
+
+    # 5️⃣ Get final form
+    final_form = service.forms().get(formId=form_id).execute()
+    form_url = final_form.get("responderUri", f"https://docs.google.com/forms/d/{form_id}/viewform")
+
+    logger.info(f"✅ Form updated successfully: {form_url}")
+
+    return form_id, form_url
