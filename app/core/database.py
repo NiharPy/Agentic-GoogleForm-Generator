@@ -27,7 +27,7 @@ engine = create_async_engine(
     # Async settings
     connect_args={
         "server_settings": {
-            "application_name": "FormsGen",
+            "application_name": "FormGen",
             "jit": "off"  # Disable JIT for better connection stability
         },
         # Connection timeout settings

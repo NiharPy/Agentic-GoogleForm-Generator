@@ -34,9 +34,19 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(
     title="AI Form Agent",
     lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(chat.router)
